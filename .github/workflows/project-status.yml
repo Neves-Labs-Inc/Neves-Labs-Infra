@@ -1,0 +1,199 @@
+name: Project status
+
+on:
+  issues:
+    types: [labeled, unlabeled]
+  create:
+  # Not pull_request_target: it would run with secrets against fork-controlled content.
+  pull_request:
+    types: [opened, reopened]
+
+permissions: {}
+
+env:
+  PROJECT_ID: PVT_kwDOErZtDc4BmxQV
+
+# Only `blocked` label events on the same issue share a group (`==` ignores case), so runs that read and
+# write that issue's Status go one at a time. Everything else (other labels, branch and PR events) gets a
+# group of its own and can never cancel a pending `blocked` run. A pending run replaced by a newer one is
+# safe because each run decides from the issue's live labels, not from its own payload.
+concurrency:
+  group: >-
+    ${{ github.event_name == 'issues' && github.event.label.name == 'blocked'
+    && format('project-status-blocked-{0}', github.event.issue.number)
+    || format('project-status-run-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  sync-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PROJECT_TOKEN
+        env:
+          PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+        run: |
+          if [ -z "$PROJECT_TOKEN" ]; then
+            echo "::error::PROJECT_TOKEN secret is not set"
+            exit 1
+          fi
+
+      - name: Sync project Status
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.PROJECT_TOKEN }}
+          script: |
+            const { PROJECT_ID } = process.env;
+            const BLOCKED_LABEL = 'blocked';
+            const STATUS = { BLOCKED: 'Blocked', IN_PROGRESS: 'In Progress', DONE: 'Done' };
+            const MODE = { BLOCKED_LABEL: 'blocked-label', WORK_STARTED: 'work-started' };
+            const MAX_PROJECT_ITEMS = 20;
+            const MAX_LABELS = 100;
+            // GraphQL Int is 32-bit; a larger number can't be an issue and would fail the whole run.
+            const MAX_ISSUE_NUMBER = 2 ** 31 - 1;
+
+            // `6-x`, `feat/6-x`, `fix/x/12-y`: the issue number is the leading digits of any path segment, followed by `-`.
+            const BRANCH_ISSUE_PATTERN = /^(?:[^/]+\/)*(\d+)-/;
+            // `Closes #2`, `fixes: #3`; a bare `#N` only, so `other/repo#N` never matches. The separator is written as
+            // alternatives (not `\s*:?\s+`) so long whitespace runs can't backtrack quadratically.
+            const CLOSING_KEYWORD_PATTERN = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s+|\s*:\s+)#(\d+)\b/gi;
+
+            function getBranchIssues(branch) {
+              const match = BRANCH_ISSUE_PATTERN.exec(branch);
+              return match ? [Number(match[1])] : [];
+            }
+
+            function getClosingIssues(body) {
+              return [...(body ?? '').matchAll(CLOSING_KEYWORD_PATTERN)].map((m) => Number(m[1]));
+            }
+
+            // Reads the event into { issues, mode }; null means "not ours, exit quietly".
+            function getRefs() {
+              const { eventName, payload } = context;
+              let refs = null;
+              if (eventName === 'issues' && payload.label?.name.toLowerCase() === BLOCKED_LABEL) {
+                refs = { issues: [payload.issue.number], mode: MODE.BLOCKED_LABEL };
+              } else if (eventName === 'create' && payload.ref_type === 'branch') {
+                refs = { issues: getBranchIssues(payload.ref), mode: MODE.WORK_STARTED };
+              } else if (eventName === 'pull_request') {
+                const { body, head } = payload.pull_request;
+                refs = { issues: [...new Set([...getClosingIssues(body), ...getBranchIssues(head.ref)])], mode: MODE.WORK_STARTED };
+              }
+              return refs?.issues.length ? refs : null;
+            }
+
+            async function getIssue(number) {
+              const query = `
+                query($owner: String!, $name: String!, $number: Int!, $first: Int!, $maxLabels: Int!) {
+                  repository(owner: $owner, name: $name) {
+                    issue(number: $number) {
+                      state
+                      labels(first: $maxLabels) { nodes { name } }
+                      projectItems(first: $first) {
+                        nodes {
+                          id
+                          project { id }
+                          fieldValueByName(name: "Status") {
+                            ... on ProjectV2ItemFieldSingleSelectValue { name }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }`;
+              let response;
+              try {
+                response = await github.graphql(query, { owner: context.repo.owner, name: context.repo.repo, number, first: MAX_PROJECT_ITEMS, maxLabels: MAX_LABELS });
+              } catch (error) {
+                // Only a missing issue counts as "not found"; a NOT_FOUND on repository means the token can't see the repo and must fail.
+                const isIssueNotFound = (e) => e.type === 'NOT_FOUND' && e.path?.join('.') === 'repository.issue';
+                const isNotFound = error.errors?.length > 0 && error.errors.every(isIssueNotFound);
+                if (!isNotFound) throw error;
+                return null;
+              }
+
+              const issue = response.repository.issue;
+              if (!issue) return null;
+
+              const node = issue.projectItems.nodes.find((n) => n.project.id === PROJECT_ID);
+              const item = node ? { id: node.id, status: node.fieldValueByName?.name ?? null } : null;
+              const hasBlockedLabel = issue.labels.nodes.some((l) => l.name.toLowerCase() === BLOCKED_LABEL);
+              return { state: issue.state, hasBlockedLabel, item };
+            }
+
+            // Looked up once per run; option ids are never hardcoded.
+            let statusFieldPromise = null;
+            function statusIds() {
+              statusFieldPromise ??= github.graphql(`
+                query($projectId: ID!) {
+                  node(id: $projectId) {
+                    ... on ProjectV2 {
+                      field(name: "Status") {
+                        ... on ProjectV2SingleSelectField { id options { id name } }
+                      }
+                    }
+                  }
+                }`, { projectId: PROJECT_ID }).then(({ node }) => {
+                  const field = node.field;
+                  const optionIds = new Map(field.options.map((o) => [o.name, o.id]));
+                  return {
+                    fieldId: field.id,
+                    optionId(name) {
+                      if (!optionIds.has(name)) throw new Error(`Status option "${name}" not found in project ${PROJECT_ID}`);
+                      return optionIds.get(name);
+                    },
+                  };
+                });
+              return statusFieldPromise;
+            }
+
+            async function setStatus(itemId, name) {
+              const { fieldId, optionId } = await statusIds();
+              await github.graphql(`
+                mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+                  updateProjectV2ItemFieldValue(input: {
+                    projectId: $projectId, itemId: $itemId, fieldId: $fieldId,
+                    value: { singleSelectOptionId: $optionId }
+                  }) { projectV2Item { id } }
+                }`, { projectId: PROJECT_ID, itemId, fieldId, optionId: optionId(name) });
+            }
+
+            // Returns { target } to set, or { skip } with the reason. `mode` picks the rule set.
+            function decide(mode, issue) {
+              if (mode !== MODE.BLOCKED_LABEL && mode !== MODE.WORK_STARTED) throw new Error(`Unknown mode "${mode}"`);
+              if (!issue) return { skip: 'issue not found' };
+              if (!issue.item) return { skip: 'not in project' };
+              if (issue.state === 'CLOSED') return { skip: 'closed' };
+              if (issue.item.status === STATUS.DONE) return { skip: 'Status is Done' };
+
+              const status = issue.item.status ?? 'empty';
+              if (mode === MODE.WORK_STARTED) {
+                return status === STATUS.IN_PROGRESS ? { skip: 'already In Progress' } : { target: STATUS.IN_PROGRESS };
+              }
+
+              let decision;
+              // Live labels, not payload.action: when runs queue or arrive out of order, the last one still lands right.
+              if (issue.hasBlockedLabel) {
+                decision = status === STATUS.BLOCKED ? { skip: 'already Blocked' } : { target: STATUS.BLOCKED };
+              } else {
+                decision = status === STATUS.BLOCKED ? { target: STATUS.IN_PROGRESS } : { skip: `no blocked label and Status is ${status}, not Blocked` };
+              }
+              return decision;
+            }
+
+            const refs = getRefs();
+            if (!refs) return;
+
+            for (const number of refs.issues) {
+              if (number > MAX_ISSUE_NUMBER) {
+                core.notice(`#${number}: skip (issue number out of range)`);
+                continue;
+              }
+              const issue = await getIssue(number);
+              const { target, skip } = decide(refs.mode, issue);
+              if (target) {
+                await setStatus(issue.item.id, target);
+                core.notice(`#${number}: set ${target}`);
+              } else {
+                core.notice(`#${number}: skip (${skip})`);
+              }
+            }
