@@ -2,6 +2,92 @@
 
 Infrastructure for Neves Labs.
 
+## Infrastructure
+
+Terraform for the Neves Labs AWS organization.
+
+### Layout
+
+- `organization/`: management account (211125623243). Member accounts, the `Clients` OU, SSO access, and budgets.
+- `bootstrap/`: the Terraform state bucket, in the Neves-Labs account.
+
+### Before the first apply
+
+- Confirm the plus-addresses you plan to use aren't already used by any AWS account.
+- Set `sso_user_name = "<your Identity Center user name>"` in `organization/terraform.tfvars`.
+- The plan must show the existing `Clients` OU (`ou-3bja-eq1u7cmv`) as an **import**, never a create or replace.
+
+### Not managed here
+
+- OU `Sandbox`
+- The suspended `mhh-prod` account
+- The pre-existing budgets "Max Monthly Spendeture" and "My Zero-Spend Budget"
+
+### First-time order
+
+1. `aws login` / SSO into the management account.
+2. Copy `organization/terraform.tfvars.example` to `organization/terraform.tfvars` and fill it in.
+   The file is gitignored; never commit real emails or the SSO user name, the repo is public.
+3. In `organization/`, run `terraform init && terraform plan && terraform apply` (local state).
+4. Read `terraform output account_ids`.
+5. In `bootstrap/`, run `terraform init && terraform apply -var state_account_id=<Neves-Labs account id>`.
+6. Migrate both states to the bucket. TODO: documented by ticket 05 (state migration); replace this line when it lands.
+
+### Changing an account email
+
+Terraform ignores `email`, so editing tfvars alone changes nothing in AWS.
+
+1. Enable trusted access for AWS Account Management once. It is currently not enabled:
+
+   ```sh
+   aws organizations enable-aws-service-access --service-principal account.amazonaws.com
+   ```
+
+2. From the management account, run `aws account start-primary-email-update`, then `aws account accept-primary-email-update`.
+3. Update the email in tfvars.
+
+### Accounts can't be destroyed
+
+Every account has `prevent_destroy`, so Terraform refuses to destroy one. Closing an account is a manual step in AWS.
+
+### `~/.aws/config`
+
+Add one profile per account. The `sso-session tutorlink` block must already exist.
+
+```ini
+[profile Neves-Labs]
+sso_session = tutorlink
+sso_account_id = <Neves-Labs id from terraform output account_ids>
+sso_role_name = AdministratorAccess
+region = us-east-1
+
+[profile tutorlink-prod]
+sso_session = tutorlink
+sso_account_id = <tutorlink-prod id from terraform output account_ids>
+sso_role_name = AdministratorAccess
+region = us-east-1
+
+[profile tn-cleaning-prod]
+sso_session = tutorlink
+sso_account_id = <tn-cleaning-prod id from terraform output account_ids>
+sso_role_name = AdministratorAccess
+region = us-east-1
+```
+
+### CI
+
+`.github/workflows/terraform.yml` runs on pull requests and pushes to `main`, once for `organization/` and once for
+`bootstrap/`:
+
+- `terraform fmt -check -recursive`
+- `terraform init -backend=false`
+- `terraform validate`
+- `tflint --init` and `tflint`, configured by `.tflint.hcl` (the `terraform` recommended preset and the `aws` ruleset)
+- `terraform test`
+
+CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in both
+roots weekly, alongside the GitHub Actions versions.
+
 ## Project automations
 
 The workflow `.github/workflows/project-status.yml` keeps the **Status** field of the org project

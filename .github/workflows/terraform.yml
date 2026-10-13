@@ -1,0 +1,53 @@
+name: Terraform
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.root }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        root: [organization, bootstrap]
+    defaults:
+      run:
+        working-directory: ${{ matrix.root }}
+    env:
+      TFLINT_CONFIG_FILE: ${{ github.workspace }}/.tflint.hcl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.4
+          terraform_wrapper: false
+
+      - uses: terraform-linters/setup-tflint@6ffdbaa3be476b3431f7275c26966ef32ff60337 # v6.3.2
+        with:
+          tflint_version: v0.64.0
+
+      - run: terraform fmt -check -recursive
+
+      # No backend and no AWS credentials: CI never talks to AWS.
+      - run: terraform init -backend=false
+
+      - run: terraform validate
+
+      - run: tflint --init
+        env:
+          # Plugin downloads from GitHub hit API rate limits without a token.
+          # Scoped to this step so PR-controlled code in later steps can't read it.
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - run: tflint
+
+      - run: terraform test
