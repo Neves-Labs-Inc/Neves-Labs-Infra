@@ -1,4 +1,5 @@
 .scratch/
+.claude/worktrees/
 
 # Terraform
 .terraform/

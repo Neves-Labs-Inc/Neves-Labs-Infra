@@ -10,6 +10,7 @@ Terraform for the Neves Labs AWS organization.
 
 - `organization/`: management account (211125623243). Member accounts, the `Clients` OU, SSO access, and budgets.
 - `bootstrap/`: the Terraform state bucket, in the Neves-Labs account.
+- `network/`: shared VPC in the Neves-Labs account (277396470866). Private subnets, the `neves-labs-pg` security group and DB subnet group. No NAT or internet gateway.
 
 ### Before the first apply
 
@@ -91,10 +92,38 @@ sso_role_name = AdministratorAccess
 region = us-east-1
 ```
 
+### Network (`network/`)
+
+1. `aws login` into the management account (default profile). The root assumes `OrganizationAccountAccessRole` in
+   Neves-Labs, and state already lives in the bucket, so no bootstrap or override is needed.
+2. `cd network && terraform init && terraform plan`.
+3. Check that the plan creates only the following and nothing else, with no replaces: the VPC, 2 subnets, the route
+   table and 2 associations, the default SG takeover, the `neves-labs-pg` SG, 2 ingress rules, and the DB subnet group.
+4. `terraform apply`.
+5. Run `terraform output` and record `vpc_id`, `private_subnet_ids`, `private_route_table_id`,
+   `postgres_security_group_id` and `db_subnet_group_name`. Other roots and the TutorLink repo hard-code these values;
+   nothing reads this state remotely.
+
+Reserved CIDRs:
+
+| Range | Use |
+|---|---|
+| 10.10.0.0/16 | Neves-Labs shared VPC |
+| 10.20.0.0/16 | tutorlink-prod |
+| 10.30.0.0/16 | tn-cleaning-prod |
+| 172.31.0.0/16 | default VPC, avoid |
+
+Adding a client means adding its CIDR to `reserved_cidrs` in `network/`, which also opens 5432 to it.
+
+Notes:
+
+- The VPC, subnets and DB subnet group have `prevent_destroy`.
+- Subnets are pinned by AZ ID (`use1-az1`, `use1-az2`), because AZ names differ between accounts.
+
 ### CI
 
-`.github/workflows/terraform.yml` runs on pull requests and pushes to `main`, once for `organization/` and once for
-`bootstrap/`:
+`.github/workflows/terraform.yml` runs on pull requests and pushes to `main`, once for `organization/`, once for
+`bootstrap/` and once for `network/`:
 
 - `terraform fmt -check -recursive`
 - `terraform init -backend=false`
@@ -102,7 +131,7 @@ region = us-east-1
 - `tflint --init` and `tflint`, configured by `.tflint.hcl` (the `terraform` recommended preset and the `aws` ruleset)
 - `terraform test`
 
-CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in both
+CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in all three
 roots weekly, alongside the GitHub Actions versions.
 
 ## Project automations
