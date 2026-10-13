@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Never commit real emails or the SSO user name: this repo is public.
+
+account_emails = {
+  neves_labs       = "you+neves-labs@example.com"
+  tutorlink_prod   = "you+tutorlink-prod@example.com"
+  tn_cleaning_prod = "you+tn-cleaning-prod@example.com"
+}
+
+alert_email   = "you+aws-alerts@example.com"
+sso_user_name = "your-identity-center-username"
+
+# region = "us-east-1"
