@@ -27,6 +27,16 @@ The workflow `.github/workflows/project-status.yml` keeps the **Status** field o
 - Closed issues, items already In Progress, and issues that aren't in project #6 are skipped.
 - A branch event and a label change on the same issue can race; the later write wins.
 
+### Forks and Dependabot
+
+PRs from forks and runs triggered by Dependabot have no access to `PROJECT_TOKEN`, so they skip with a green run and
+one notice:
+
+- `skip (fork PR: PROJECT_TOKEN unavailable)`
+- `skip (Dependabot: PROJECT_TOKEN unavailable)`
+
+Status is not synced for them.
+
 ### Setup
 
 1. **Label**
@@ -47,7 +57,10 @@ The workflow `.github/workflows/project-status.yml` keeps the **Status** field o
    gh secret set PROJECT_TOKEN -R Neves-Labs-Inc/Neves-Labs-Infra
    ```
 
-   If the secret is missing, the run fails with `PROJECT_TOKEN secret is not set`.
+   For same-repo events, if the secret is missing the run fails with `PROJECT_TOKEN secret is not set`.
+   Fork PRs and Dependabot runs skip instead (see below).
+
+3. **Dependabot**: `.github/dependabot.yml` checks GitHub Actions versions weekly.
 
 ### Reading the run log
 
@@ -58,6 +71,8 @@ run summary's **Annotations**, for example:
 - `#3: skip (closed)`
 - `#3: skip (already In Progress)`
 - `#3: skip (no blocked label and Status is Todo, not Blocked)`
+- `skip (fork PR: PROJECT_TOKEN unavailable)`
+- `skip (Dependabot: PROJECT_TOKEN unavailable)`
 
 A run with no notices ignored the event (for example, a label other than `blocked`). A failed run means a GraphQL
 or API error, usually a token that lacks access to the project.

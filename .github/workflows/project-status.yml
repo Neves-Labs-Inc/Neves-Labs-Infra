@@ -29,15 +29,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check PROJECT_TOKEN
+        id: check-token
         env:
           PROJECT_TOKEN: ${{ secrets.PROJECT_TOKEN }}
+          # A deleted fork has a null head.repo, so the comparison is true and it counts as a fork.
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          IS_DEPENDABOT: ${{ github.actor == 'dependabot[bot]' }}
         run: |
+          if [ "$IS_FORK_PR" = "true" ]; then
+            echo "::notice::skip (fork PR: PROJECT_TOKEN unavailable)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          elif [ "$IS_DEPENDABOT" = "true" ]; then
+            echo "::notice::skip (Dependabot: PROJECT_TOKEN unavailable)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -z "$PROJECT_TOKEN" ]; then
             echo "::error::PROJECT_TOKEN secret is not set"
             exit 1
           fi
 
       - name: Sync project Status
+        if: steps.check-token.outputs.skip != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ secrets.PROJECT_TOKEN }}
