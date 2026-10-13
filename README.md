@@ -28,10 +28,27 @@ Terraform for the Neves Labs AWS organization.
 1. `aws login` / SSO into the management account.
 2. Copy `organization/terraform.tfvars.example` to `organization/terraform.tfvars` and fill it in.
    The file is gitignored; never commit real emails or the SSO user name, the repo is public.
-3. In `organization/`, run `terraform init && terraform plan && terraform apply` (local state).
-4. Read `terraform output account_ids`.
-5. In `bootstrap/`, run `terraform init && terraform apply -var state_account_id=<Neves-Labs account id>`.
-6. Migrate both states to the bucket. TODO: documented by ticket 05 (state migration); replace this line when it lands.
+3. The state bucket doesn't exist yet, so force local state until it does. In both `organization/` and `bootstrap/`,
+   create `backend_override.tf` (gitignored via `*_override.tf`) containing:
+
+   ```hcl
+   terraform {
+     backend "local" {}
+   }
+   ```
+
+   If `organization/` was already applied with local state, this keeps that state; `terraform init` in the next step picks it up.
+4. In `organization/`, run `terraform init && terraform plan && terraform apply` (skip the apply if it is already applied).
+5. Read `terraform output account_ids`.
+6. In `bootstrap/`, run `terraform init && terraform apply`.
+7. Migrate both states to the bucket:
+   1. Delete `backend_override.tf` in both directories.
+   2. In `organization/`, then in `bootstrap/`, run `terraform init -migrate-state` and answer `yes` to copy the state.
+   3. If an `errored.tfstate` file appears in either directory, the migration failed: stop and delete nothing.
+   4. In each directory, run `terraform plan` against the new backend and confirm it reports "No changes". Also check `terraform state list`.
+   5. Only then delete the local `terraform.tfstate` and `terraform.tfstate.backup` files in both directories.
+
+   After this, `terraform init` works as usual everywhere.
 
 ### Changing an account email
 
