@@ -8,5 +8,6 @@ updates:
     directories:
       - /organization
       - /bootstrap
+      - /network
     schedule:
       interval: weekly

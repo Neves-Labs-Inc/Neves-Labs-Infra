@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [organization, bootstrap]
+        root: [organization, bootstrap, network]
     defaults:
       run:
         working-directory: ${{ matrix.root }}
