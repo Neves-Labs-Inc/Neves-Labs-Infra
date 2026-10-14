@@ -9,5 +9,6 @@ updates:
       - /organization
       - /bootstrap
       - /network
+      - /database
     schedule:
       interval: weekly

@@ -82,14 +82,20 @@ run "strips_every_rule_from_the_default_security_group" {
 run "opens_postgres_only_to_the_reserved_client_cidrs" {
   command = plan
 
+  # Exactly one rule per reserved range, so a client added to reserved_cidrs needs no test change.
   assert {
-    condition     = length(aws_vpc_security_group_ingress_rule.postgres) == 2
-    error_message = "There must be exactly 2 Postgres ingress rules."
+    condition     = length(aws_vpc_security_group_ingress_rule.postgres) == length(output.reserved_cidrs)
+    error_message = "There must be exactly one Postgres ingress rule per reserved client CIDR."
   }
 
   assert {
-    condition     = toset([for rule in aws_vpc_security_group_ingress_rule.postgres : rule.cidr_ipv4]) == toset(["10.20.0.0/16", "10.30.0.0/16"])
-    error_message = "Ingress must come from exactly 10.20.0.0/16 and 10.30.0.0/16."
+    condition     = toset([for rule in aws_vpc_security_group_ingress_rule.postgres : rule.cidr_ipv4]) == toset(values(output.reserved_cidrs))
+    error_message = "Ingress must come from exactly the reserved client CIDRs."
+  }
+
+  assert {
+    condition     = length(setsubtract(["10.20.0.0/16", "10.30.0.0/16"], [for rule in aws_vpc_security_group_ingress_rule.postgres : rule.cidr_ipv4])) == 0
+    error_message = "Ingress must include 10.20.0.0/16 (tutorlink-prod) and 10.30.0.0/16 (tn-cleaning-prod)."
   }
 
   assert {
@@ -119,11 +125,12 @@ run "exposes_the_values_franklin_copies_into_client_roots" {
   command = apply
 
   assert {
-    condition = output.reserved_cidrs == {
-      tutorlink-prod   = "10.20.0.0/16"
-      tn-cleaning-prod = "10.30.0.0/16"
-    }
-    error_message = "Output reserved_cidrs must be the reserved client CIDR map."
+    # Checks the known entries only, so adding a client's range needs no test change.
+    condition = (
+      lookup(output.reserved_cidrs, "tutorlink-prod", null) == "10.20.0.0/16"
+      && lookup(output.reserved_cidrs, "tn-cleaning-prod", null) == "10.30.0.0/16"
+    )
+    error_message = "Output reserved_cidrs must map tutorlink-prod to 10.20.0.0/16 and tn-cleaning-prod to 10.30.0.0/16."
   }
 
   assert {

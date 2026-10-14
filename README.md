@@ -11,6 +11,7 @@ Terraform for the Neves Labs AWS organization.
 - `organization/`: management account (211125623243). Member accounts, the `Clients` OU, SSO access, and budgets.
 - `bootstrap/`: the Terraform state bucket, in the Neves-Labs account.
 - `network/`: shared VPC in the Neves-Labs account (277396470866). Private subnets, the `neves-labs-pg` security group and DB subnet group. No NAT or internet gateway.
+- `database/`: the shared RDS PostgreSQL instance `neves-labs-pg` in the Neves-Labs account (277396470866), in the shared VPC, pinned to AZ ID `use1-az1`.
 
 ### Before the first apply
 
@@ -113,17 +114,113 @@ Reserved CIDRs:
 | 10.30.0.0/16 | tn-cleaning-prod |
 | 172.31.0.0/16 | default VPC, avoid |
 
-Adding a client means adding its CIDR to `reserved_cidrs` in `network/`, which also opens 5432 to it.
+Adding a client means adding its CIDR to `reserved_cidrs` in `network/`, which also opens 5432 to it. See
+[Adding a client](#adding-a-client) for the full checklist.
 
 Notes:
 
 - The VPC, subnets and DB subnet group have `prevent_destroy`.
 - Subnets are pinned by AZ ID (`use1-az1`, `use1-az2`), because AZ names differ between accounts.
 
+### Database (`database/`)
+
+1. `aws login` into the management account. The root assumes `OrganizationAccountAccessRole` in Neves-Labs.
+2. `cd database && terraform init && terraform plan`.
+3. Check that the plan creates only the parameter group `neves-labs-pg-postgres17`, the instance `neves-labs-pg`, the
+   admin password and one random password per client in `clients`, with no replaces. With the current map that is
+   2 passwords in total.
+4. `terraform apply`.
+5. Record `terraform output address` and `availability_zone_id`. The passwords are kept in state: the admin's is
+   `terraform output -raw admin_password`, and one client's is
+   `terraform output -json client_passwords | jq -r .<client>`. Read one client at a time; don't print the whole map.
+6. Once the client's peering is active (#4 for tutorlink), create its login role and database with
+   `database/bootstrap-client.sh <client>`. It runs `database/sql/client.sql` as `neveslabs_admin` through a
+   port-forward on local port 15432, which you open beforehand through a host in the client's account (see
+   [Adding a client](#adding-a-client), step 4). Re-running it is safe. It refuses a role that it didn't create
+   (marked by the comment `Managed by database/sql/client.sql`) and a same-named database the client doesn't own.
+7. Moving tutorlink's data: follow `database/RUNBOOK.md` during #4, once peering exists.
+
+Notes:
+
+- Each client gets its own database and login role, never a schema in another client's database. No client role is the
+  server's admin, which is `neveslabs_admin`.
+- TLS is enforced (`rds.force_ssl = 1`), so clients connect with `sslmode=require` or stricter.
+- The server allows about 80 connections in total. Each client has a `connection_limit` in `clients`: `tutorlink` is
+  capped at 30 and the default is 10. The plan fails when the limits add up to more than 70, which leaves the rest as
+  headroom for admin and the reserved slots.
+- Backups are kept 7 days (point-in-time restore). Database Insights standard mode is on (the free 7-day tier).
+- Deletion protection is on, and the final snapshot is `neves-labs-pg-final`.
+- No RDS Proxy (TutorLink's chat LISTEN connection).
+
+Security notes:
+
+- Read the admin password on demand with `terraform output -raw admin_password`, and a client's password with
+  `terraform output -json client_passwords | jq -r .<client>`, one client at a time.
+- Never paste the admin or a client password into files, chats, tickets or shell history.
+- If a stored copy is needed, keep it in a password manager only. The one exception is the app's connection string,
+  which goes in a SecureString parameter in the client's account (see [Adding a client](#adding-a-client), step 4).
+- `database/sql/client.sql` sends the password in plaintext `CREATE ROLE` / `ALTER ROLE` statements. Keep
+  `log_statement = none` and pgaudit role logging off on `neves-labs-pg`, or every client password lands in the RDS
+  logs.
+- Anyone who can read the state bucket `neves-labs-tfstate-277396470866` (`database/terraform.tfstate`) can read every
+  database password, so treat read access to that bucket as database admin access.
+
+### Adding a client
+
+Work through these in order. Each step ends with a plan you read before applying.
+
+1. **`organization/`**: add the client's account.
+   - Add an entry to `accounts` in `organization/main.tf` with an `email_key`, a `parent_id` of the `Clients` OU
+     (`aws_organizations_organizational_unit.clients.id`) and a `monthly_limit_usd`.
+   - Add the matching key to `account_emails` in `organization/terraform.tfvars` and in
+     `organization/terraform.tfvars.example` (a placeholder email only, the repo is public). The plan fails when the
+     keys of `account_emails` don't match the `email_key` of every account.
+   - Add the same key, with a placeholder email, to `account_emails` in the `variables` block at the top of
+     `organization/tests/organization.tftest.hcl`. The tests fail on the same key check otherwise.
+   - Run `terraform plan`, then `terraform apply`. Accounts can't be destroyed, see
+     [Accounts can't be destroyed](#accounts-cant-be-destroyed).
+   - Add a profile for the new account to [`~/.aws/config`](#awsconfig), with its id from
+     `terraform output account_ids`.
+2. **`network/`**: add the client's range to `reserved_cidrs` in `network/locals.tf`.
+   - It must not overlap the other ranges; the network test checks this.
+   - Add a row to the Reserved CIDRs table in the Network section.
+   - This also opens Postgres (5432) to the range in the `neves-labs-pg` security group.
+   - Run `terraform plan`, then `terraform apply`.
+3. **Peering and routes**: manual and per client, not templated here (see #8 for tn-cleaning).
+4. **`database/`** (only if the client needs Postgres):
+   1. Add an entry to `clients` in `database/variables.tf`, for example `acme = { connection_limit = 20 }`.
+      - `connection_limit` is optional and defaults to 10.
+      - The limits of all clients must total at most 70.
+      - The name uses lowercase letters, digits and underscores, starts with a letter, has at most 63 characters, does
+        not start with `pg_` or `rds`, and is not `postgres`, `neveslabs_admin`, `template0`, `template1` or `public`.
+   2. Run `terraform plan`. Expect exactly one new password and no replaces. Then `terraform apply`.
+   3. Once the peering from step 3 is active, open the port-forward on local port 15432 through a host in the
+      client's account that Session Manager can reach, and leave it running:
+
+      ```sh
+      PG_ADDRESS="$(terraform -chdir=database output -raw address)"
+      aws ssm start-session --profile <client account profile> \
+        --target <instance id of a host in the client account> \
+        --document-name AWS-StartPortForwardingSessionToRemoteHost \
+        --parameters "{\"host\":[\"$PG_ADDRESS\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"15432\"]}"
+      ```
+
+      In another terminal, run `database/bootstrap-client.sh <client>`.
+   4. The app's connection string is
+      `postgresql://<client>:<password>@<address>:5432/<client>?sslmode=require`. Get the password with
+      `terraform -chdir=database output -json client_passwords | jq -r .<client>`, and the address with
+      `terraform -chdir=database output -raw address`.
+   5. Store the connection string as a SecureString parameter in the client's account, never in a repo, a chat or on
+      the command line. Write the parameter JSON to a private file (`umask 077`), pass it with
+      `aws ssm put-parameter --cli-input-json file://...`, then delete the file, as in `database/RUNBOOK.md` step 6.
+      The password logging warning in the Database security notes applies to every client.
+
+Removing a client from `clients` fails the plan on purpose (`prevent_destroy`). Offboarding isn't automated.
+
 ### CI
 
 `.github/workflows/terraform.yml` runs on pull requests and pushes to `main`, once for `organization/`, once for
-`bootstrap/` and once for `network/`:
+`bootstrap/`, once for `network/` and once for `database/`:
 
 - `terraform fmt -check -recursive`
 - `terraform init -backend=false`
@@ -131,8 +228,10 @@ Notes:
 - `tflint --init` and `tflint`, configured by `.tflint.hcl` (the `terraform` recommended preset and the `aws` ruleset)
 - `terraform test`
 
-CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in all three
-roots weekly, alongside the GitHub Actions versions.
+A separate `shellcheck` job lints `database/bootstrap-client.sh`.
+
+CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in all four
+roots (`organization/`, `bootstrap/`, `network/`, `database/`) weekly, alongside the GitHub Actions versions.
 
 ## Project automations
 

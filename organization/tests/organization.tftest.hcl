@@ -43,6 +43,14 @@ mock_provider "aws" {
     }
   }
 
+  # A valid 12-digit id for any account without its own override below (a newly
+  # added client), since the budget filter rejects the mock's random ids.
+  mock_resource "aws_organizations_account" {
+    defaults = {
+      id = "000000000099"
+    }
+  }
+
   # Distinct placeholder ids so the budget filter tests can tell accounts apart.
   override_resource {
     target = aws_organizations_account.this["Neves-Labs"]
@@ -90,21 +98,23 @@ run "adopts_the_clients_ou_under_the_root" {
   }
 }
 
-run "creates_the_three_member_accounts_under_their_parents" {
+# Checks the existing accounts are present, not that they are the only ones, so adding a
+# client account only needs its email key in account_emails above.
+run "creates_the_member_accounts_under_their_parents" {
   command = plan
 
   assert {
-    condition     = length(aws_organizations_account.this) == 3
-    error_message = "Expected exactly three member accounts."
-  }
-
-  assert {
-    condition = toset([for account in aws_organizations_account.this : account.name]) == toset([
+    condition = length(setsubtract([
       "Neves-Labs",
       "tutorlink-prod",
       "tn-cleaning-prod",
-    ])
-    error_message = "Member account names must be Neves-Labs, tutorlink-prod and tn-cleaning-prod."
+    ], [for account in aws_organizations_account.this : account.name])) == 0
+    error_message = "Member accounts must include Neves-Labs, tutorlink-prod and tn-cleaning-prod."
+  }
+
+  assert {
+    condition     = alltrue([for name, account in aws_organizations_account.this : account.name == name])
+    error_message = "Each member account must be named after its key."
   }
 
   assert {
@@ -128,7 +138,7 @@ run "creates_the_three_member_accounts_under_their_parents" {
   }
 
   assert {
-    condition     = toset(keys(output.account_ids)) == toset(["Neves-Labs", "tutorlink-prod", "tn-cleaning-prod"])
+    condition     = toset(keys(output.account_ids)) == toset(keys(aws_organizations_account.this))
     error_message = "account_ids must map every member account name to its id."
   }
 }
@@ -137,7 +147,7 @@ run "grants_administrator_access_to_the_sso_user_on_every_account" {
   command = plan
 
   assert {
-    condition     = toset(keys(aws_ssoadmin_account_assignment.administrator)) == toset(["Neves-Labs", "tutorlink-prod", "tn-cleaning-prod"])
+    condition     = toset(keys(aws_ssoadmin_account_assignment.administrator)) == toset(keys(aws_organizations_account.this))
     error_message = "Expected exactly one assignment per member account."
   }
 
@@ -182,6 +192,34 @@ run "rejects_an_account_email_without_an_at_sign" {
   expect_failures = [var.account_emails]
 }
 
+run "rejects_account_emails_missing_an_account_key" {
+  command = plan
+
+  variables {
+    account_emails = {
+      neves_labs     = "owner+neves-labs@example.com"
+      tutorlink_prod = "owner+tutorlink-prod@example.com"
+    }
+  }
+
+  expect_failures = [aws_organizations_account.this]
+}
+
+run "rejects_account_emails_with_an_unknown_key" {
+  command = plan
+
+  variables {
+    account_emails = {
+      neves_labs       = "owner+neves-labs@example.com"
+      tutorlink_prod   = "owner+tutorlink-prod@example.com"
+      tn_cleaning_prod = "owner+tn-cleaning-prod@example.com"
+      unknown_prod     = "owner+unknown-prod@example.com"
+    }
+  }
+
+  expect_failures = [aws_organizations_account.this]
+}
+
 run "rejects_an_alert_email_without_an_at_sign" {
   command = plan
 
@@ -197,9 +235,7 @@ run "plans_one_monthly_cost_budget_per_account_with_its_limit" {
 
   assert {
     condition = toset([for budget in aws_budgets_budget.monthly : budget.name]) == toset([
-      "Neves-Labs-monthly",
-      "tutorlink-prod-monthly",
-      "tn-cleaning-prod-monthly",
+      for name in keys(aws_organizations_account.this) : "${name}-monthly"
     ])
     error_message = "Expected one <account>-monthly budget per member account."
   }
