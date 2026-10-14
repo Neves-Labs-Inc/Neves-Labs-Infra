@@ -10,12 +10,8 @@ variable "region" {
 }
 
 variable "account_emails" {
-  description = "Root email for each member account. Kept out of the repo in terraform.tfvars."
-  type = object({
-    neves_labs       = string
-    tutorlink_prod   = string
-    tn_cleaning_prod = string
-  })
+  description = "Root email for each member account, keyed by the email_key in local.accounts. Kept out of the repo in terraform.tfvars."
+  type        = map(string)
 
   validation {
     condition = alltrue([

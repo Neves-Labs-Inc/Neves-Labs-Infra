@@ -17,3 +17,6 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
+
+# Database dumps (database/RUNBOOK.md): never commit production data
+*.dump

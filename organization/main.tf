@@ -51,6 +51,13 @@ resource "aws_organizations_account" "this" {
 
   lifecycle {
     prevent_destroy = true
+
+    # Keys must match in both directions so a new account can't be added without its email.
+    precondition {
+      condition     = toset(keys(var.account_emails)) == toset([for account in local.accounts : account.email_key])
+      error_message = "account_emails keys must match the email_key of every account in local.accounts. Missing: ${jsonencode(sort(tolist(setsubtract([for account in local.accounts : account.email_key], keys(var.account_emails)))))}. Unexpected: ${jsonencode(sort(tolist(setsubtract(keys(var.account_emails), [for account in local.accounts : account.email_key]))))}."
+    }
+
     # email is ForceNew: change it with `aws account start-primary-email-update`,
     # never through Terraform.
     ignore_changes = [email]

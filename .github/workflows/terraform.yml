@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        root: [organization, bootstrap, network]
+        root: [organization, bootstrap, network, database]
     defaults:
       run:
         working-directory: ${{ matrix.root }}
@@ -51,3 +51,13 @@ jobs:
       - run: tflint
 
       - run: terraform test
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # shellcheck is preinstalled on ubuntu-latest.
+      - run: shellcheck database/bootstrap-client.sh
