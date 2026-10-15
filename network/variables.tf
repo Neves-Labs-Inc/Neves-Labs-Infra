@@ -11,7 +11,7 @@ variable "client_peerings" {
   default = {
     tutorlink-prod = {
       # Paste TutorLink's `terraform output peering_connection_id` (infra/) here.
-      peering_connection_id = "pcx-SET-FROM-TUTORLINK-OUTPUT"
+      peering_connection_id = "pcx-0b03b59b6be07e388"
       app_subnet_cidr       = "10.20.0.0/24"
       # tutorlink-prod, the member account that owns TutorLink's app VPC.
       requester_account_id = "046451670022"

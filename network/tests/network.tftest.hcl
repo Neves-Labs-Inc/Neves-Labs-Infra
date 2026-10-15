@@ -28,8 +28,8 @@ override_data {
   }
 }
 
-# The real default holds a placeholder that fails validation, so every run starts
-# from a valid-looking peering ID.
+# Every run starts from a fixed, valid-looking peering ID, independent of the real
+# default in variables.tf.
 variables {
   client_peerings = {
     tutorlink-prod = {
