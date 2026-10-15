@@ -98,8 +98,12 @@ region = us-east-1
 1. `aws login` into the management account (default profile). The root assumes `OrganizationAccountAccessRole` in
    Neves-Labs, and state already lives in the bucket, so no bootstrap or override is needed.
 2. `cd network && terraform init && terraform plan`.
-3. Check that the plan creates only the following and nothing else, with no replaces: the VPC, 2 subnets, the route
-   table and 2 associations, the default SG takeover, the `neves-labs-pg` SG, 2 ingress rules, and the DB subnet group.
+3. Check that the plan holds only the following and nothing else, with no replaces of the VPC, subnets or DB subnet
+   group: the VPC, 2 subnets, the route table and 2 associations, the default security group takeover, the default
+   network ACL takeover (both subnets), the `neves-labs-pg` security group, the DB subnet group, and per
+   `client_peerings` entry one peering accepter, one route and one 5432 ingress rule. The plan fails while a client's
+   `peering_connection_id` is still the placeholder, or when the peering wasn't requested by that client's account and
+   VPC range; see [Adding a client](#adding-a-client), step 3.
 4. `terraform apply`.
 5. Run `terraform output` and record `vpc_id`, `private_subnet_ids`, `private_route_table_id`,
    `postgres_security_group_id` and `db_subnet_group_name`. Other roots and the TutorLink repo hard-code these values;
@@ -114,7 +118,8 @@ Reserved CIDRs:
 | 10.30.0.0/16 | tn-cleaning-prod |
 | 172.31.0.0/16 | default VPC, avoid |
 
-Adding a client means adding its CIDR to `reserved_cidrs` in `network/`, which also opens 5432 to it. See
+Adding a client means reserving its CIDR in `reserved_cidrs` and, once its peering exists, adding a `client_peerings`
+entry in `network/`. Only the `client_peerings` entry opens 5432, and only from the client's app subnet. See
 [Adding a client](#adding-a-client) for the full checklist.
 
 Notes:
@@ -138,7 +143,8 @@ Notes:
    port-forward on local port 15432, which you open beforehand through a host in the client's account (see
    [Adding a client](#adding-a-client), step 4). Re-running it is safe. It refuses a role that it didn't create
    (marked by the comment `Managed by database/sql/client.sql`) and a same-named database the client doesn't own.
-7. Moving tutorlink's data: follow `database/RUNBOOK.md` during #4, once peering exists.
+7. Moving tutorlink's data: follow `database/RUNBOOK.md` during #4, once peering exists. It covers the pre-window
+   steps, the Elastic IP transfer and the rollback.
 
 Notes:
 
@@ -184,9 +190,19 @@ Work through these in order. Each step ends with a plan you read before applying
 2. **`network/`**: add the client's range to `reserved_cidrs` in `network/locals.tf`.
    - It must not overlap the other ranges; the network test checks this.
    - Add a row to the Reserved CIDRs table in the Network section.
-   - This also opens Postgres (5432) to the range in the `neves-labs-pg` security group.
+   - This reserves the range only; it opens nothing. Postgres opens in step 3.
    - Run `terraform plan`, then `terraform apply`.
-3. **Peering and routes**: manual and per client, not templated here (see #8 for tn-cleaning).
+3. **Peering**: the client repo requests the peering, then `network/` accepts it.
+   - Apply the client repo first and read its `terraform output peering_connection_id` (TutorLink: `infra/`).
+   - Add an entry to `client_peerings` in `network/variables.tf`, keyed like `reserved_cidrs`, with that
+     `peering_connection_id`, the client's `app_subnet_cidr` (inside its reserved range) and its
+     `requester_account_id` (the client account's ID, from `terraform output account_ids` in `organization/`).
+   - Before accepting, the plan reads the peering from AWS and fails unless it was requested from that account, from a
+     VPC whose range is the client's reserved range, toward the shared VPC. A wrong or foreign `pcx-` ID never gets
+     accepted.
+   - The entry accepts the peering, routes the client's reserved range through it, and opens 5432 from the app subnet
+     in both the `neves-labs-pg` security group and the default network ACL.
+   - Run `terraform plan`, then `terraform apply`.
 4. **`database/`** (only if the client needs Postgres):
    1. Add an entry to `clients` in `database/variables.tf`, for example `acme = { connection_limit = 20 }`.
       - `connection_limit` is optional and defaults to 10.
@@ -212,7 +228,7 @@ Work through these in order. Each step ends with a plan you read before applying
       `terraform -chdir=database output -raw address`.
    5. Store the connection string as a SecureString parameter in the client's account, never in a repo, a chat or on
       the command line. Write the parameter JSON to a private file (`umask 077`), pass it with
-      `aws ssm put-parameter --cli-input-json file://...`, then delete the file, as in `database/RUNBOOK.md` step 6.
+      `aws ssm put-parameter --cli-input-json file://...`, then delete the file, as in `database/RUNBOOK.md` step 7.
       The password logging warning in the Database security notes applies to every client.
 
 Removing a client from `clients` fails the plan on purpose (`prevent_destroy`). Offboarding isn't automated.
