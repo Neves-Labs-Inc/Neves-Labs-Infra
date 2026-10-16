@@ -1,11 +1,11 @@
 -- Gives one client its own login role and database on neves-labs-pg.
 --
--- Normally run via database/bootstrap-client.sh <client>, which reads the inputs from terraform output and
--- connects as neveslabs_admin, to database postgres, through the port-forward in database/RUNBOOK.md (step 1).
--- It takes three psql variables:
+-- Normally run on a host in the client's account through database/bootstrap-client.sh, which reads the inputs
+-- from terraform output and connects as neveslabs_admin, to database postgres. It takes three psql variables:
 --
 --   client            role and database name (a key of the clients map in database/variables.tf)
---   client_password   from terraform output -json client_passwords
+--   client_password   from terraform output -json client_passwords, passed either as -v client_password=... or
+--                     through a \getenv client_password CLIENT_PASSWORD line placed before this file
 --   connection_limit  from terraform output -json client_connection_limits
 --
 -- Re-running with the same inputs is a no-op: existing objects are skipped, the role membership GRANT raises a
