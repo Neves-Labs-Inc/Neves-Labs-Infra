@@ -59,5 +59,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # shellcheck is preinstalled on ubuntu-latest.
-      - run: shellcheck database/bootstrap-client.sh
+      # shellcheck is preinstalled on ubuntu-latest. Lints every committed .sh, so new scripts are covered.
+      - run: git ls-files -z '*.sh' | xargs -0 shellcheck
+
+      # Stub aws, terraform and docker: no AWS, no network. jq is preinstalled on ubuntu-latest.
+      - run: bash database/tests/scripts/run-tests.sh

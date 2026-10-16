@@ -18,5 +18,5 @@ override.tf.json
 .terraformrc
 terraform.rc
 
-# Database dumps (database/RUNBOOK.md): never commit production data
+# Database dumps (see "Moving a client's existing data" in README.md): never commit production data
 *.dump

@@ -93,6 +93,20 @@ sso_role_name = AdministratorAccess
 region = us-east-1
 ```
 
+### Operator notes
+
+- Run scripts with `bash x.sh`, never `source x.sh`: a failing sourced script closes the terminal.
+- Use single-line commands or script files. Long multi-line pastes get mangled in the macOS bash 3.2 terminal.
+- Systems Manager port-forward tunnels open but never forward on Franklin's Mac, so database work runs on servers
+  through Run Command (`database/bootstrap-client.sh` and `database/set-database-url.sh`).
+- Franklin runs `terraform apply` in his own console. Claude Code's `!` prompt has no TTY to confirm an apply.
+- `aws login` (management account, default profile) and `aws sso login --sso-session tutorlink` both expire
+  mid-session. Refresh them before long steps.
+- The `neves-labs-pg` instance is only visible with `--profile Neves-Labs`.
+- Lifting deletion protection is a manual step for Franklin: the agent auto-mode safety check blocks it.
+- Keep AWS CLI command history off (`cli_history` in `~/.aws/config` is off by default). When it is on, the CLI saves
+  `put-parameter` values in plaintext, and that includes the connection string.
+
 ### Network (`network/`)
 
 1. `aws login` into the management account (default profile). The root assumes `OrganizationAccountAccessRole` in
@@ -138,13 +152,15 @@ Notes:
 5. Record `terraform output address` and `availability_zone_id`. The passwords are kept in state: the admin's is
    `terraform output -raw admin_password`, and one client's is
    `terraform output -json client_passwords | jq -r .<client>`. Read one client at a time; don't print the whole map.
-6. Once the client's peering is active (#4 for tutorlink), create its login role and database with
-   `database/bootstrap-client.sh <client>`. It runs `database/sql/client.sql` as `neveslabs_admin` through a
-   port-forward on local port 15432, which you open beforehand through a host in the client's account (see
-   [Adding a client](#adding-a-client), step 4). Re-running it is safe. It refuses a role that it didn't create
+6. Once the client's peering is active, create its login role and database with
+   `database/bootstrap-client.sh <client> <aws-profile> <instance-id> <parameter-prefix>`. It needs `aws login` for
+   the management account (it reads terraform) and a login for `<aws-profile>`. It runs
+   `database/sql/client.sql` as `neveslabs_admin` on a host in the client's account through Systems Manager Run
+   Command, so nothing on your machine connects to the database. The host needs the prerequisites in
+   [Adding a client](#adding-a-client), step 4, substep 3. Re-running it is safe. It refuses a role that it didn't create
    (marked by the comment `Managed by database/sql/client.sql`) and a same-named database the client doesn't own.
-7. Moving tutorlink's data: follow `database/RUNBOOK.md` during #4, once peering exists. It covers the pre-window
-   steps, the Elastic IP transfer and the rollback.
+7. To move a client's existing data onto `neves-labs-pg`, see
+   [Moving a client's existing data](#moving-a-clients-existing-data).
 
 Notes:
 
@@ -165,6 +181,12 @@ Security notes:
 - Never paste the admin or a client password into files, chats, tickets or shell history.
 - If a stored copy is needed, keep it in a password manager only. The one exception is the app's connection string,
   which goes in a SecureString parameter in the client's account (see [Adding a client](#adding-a-client), step 4).
+- `database/bootstrap-client.sh` briefly stages the `neves-labs-pg` admin password, which reaches every client's
+  database, as a SecureString parameter in the client's account. That account's admins and the client server's role
+  can read it while it is staged, and so can any process on the client host, including the client's app and
+  containers on the host network (bridge-network containers can't when the instance requires IMDSv2 and its metadata hop limit is 1). The
+  script deletes it on exit. This is accepted because clients have no access
+  to their AWS accounts: Franklin manages them. Revisit it if a client ever gets AWS access.
 - `database/sql/client.sql` sends the password in plaintext `CREATE ROLE` / `ALTER ROLE` statements. Keep
   `log_statement = none` and pgaudit role logging off on `neves-labs-pg`, or every client password lands in the RDS
   logs.
@@ -210,28 +232,61 @@ Work through these in order. Each step ends with a plan you read before applying
       - The name uses lowercase letters, digits and underscores, starts with a letter, has at most 63 characters, does
         not start with `pg_` or `rds`, and is not `postgres`, `neveslabs_admin`, `template0`, `template1` or `public`.
    2. Run `terraform plan`. Expect exactly one new password and no replaces. Then `terraform apply`.
-   3. Once the peering from step 3 is active, open the port-forward on local port 15432 through a host in the
-      client's account that Session Manager can reach, and leave it running:
+   3. Once the peering from step 3 is active, bootstrap the client from a host in its account. The host must:
+      - be an online Systems Manager managed node, with Docker and the AWS CLI installed
+      - sit in the client's app subnet (`app_subnet_cidr`), the only source that step 3 allows to reach port 5432
+      - have an instance role that reads the parameters under `<parameter-prefix>*` (which covers the temporary
+        `<parameter-prefix>-bootstrap/` parameters) and decrypts with the key of those parameters
+
+      Then run:
 
       ```sh
-      PG_ADDRESS="$(terraform -chdir=database output -raw address)"
-      aws ssm start-session --profile <client account profile> \
-        --target <instance id of a host in the client account> \
-        --document-name AWS-StartPortForwardingSessionToRemoteHost \
-        --parameters "{\"host\":[\"$PG_ADDRESS\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"15432\"]}"
+      database/bootstrap-client.sh <client> <aws-profile> <instance-id> <parameter-prefix>
       ```
 
-      In another terminal, run `database/bootstrap-client.sh <client>`.
-   4. The app's connection string is
-      `postgresql://<client>:<password>@<address>:5432/<client>?sslmode=require`. Get the password with
-      `terraform -chdir=database output -json client_passwords | jq -r .<client>`, and the address with
-      `terraform -chdir=database output -raw address`.
-   5. Store the connection string as a SecureString parameter in the client's account, never in a repo, a chat or on
-      the command line. Write the parameter JSON to a private file (`umask 077`), pass it with
-      `aws ssm put-parameter --cli-input-json file://...`, then delete the file, as in `database/RUNBOOK.md` step 7.
-      The password logging warning in the Database security notes applies to every client.
+      For tutorlink that is `database/bootstrap-client.sh tutorlink tutorlink-prod <instance-id> /tutorlink/prod`.
+      The script stages the admin and client passwords as temporary SecureString parameters under
+      `<parameter-prefix>-bootstrap/`, runs `database/sql/client.sql` on the host through Run Command, and deletes the
+      parameters on exit. It prints the `\du` and `\l` output for the client. Check that:
+      - the role has no Superuser, Create role or Create DB attribute, and the connection limit is the one in `clients`
+      - the database is owned by the client
+      - the access privileges are `<client>=CTc/<client>` only, with no PUBLIC `=c/` entry
+
+      Re-running it is safe. If it warns that it couldn't delete the temporary parameters, run the
+      `aws ssm delete-parameters` command it prints.
+   4. Store the app's connection string with:
+
+      ```sh
+      database/set-database-url.sh <client> <aws-profile> <parameter-name> [scheme]
+      ```
+
+      The value is `<scheme>://<client>:<password>@<address>:5432/<client>?sslmode=require`. The scheme defaults to
+      `postgresql`; pass another as the fourth argument, for example `postgresql+psycopg`. The parameter name must start
+      with `/<client>/` (underscores in the client name may be hyphens). The script writes a SecureString parameter in
+      the client's account through a private temporary file and prints only `<parameter-name> set, version <N>`, so the
+      password never reaches a repo, a chat or the command line. The password logging warning in the Database security
+      notes applies to every client.
 
 Removing a client from `clients` fails the plan on purpose (`prevent_destroy`). Offboarding isn't automated.
+
+### Moving a client's existing data
+
+This is the pattern the tutorlink move used in October 2026. It needs no scripts in this repo. Dumps never go in the
+repo (`*.dump` is gitignored), and the downtime plan and any app-specific steps live in the client's repo.
+
+1. Stage the passwords as `database/bootstrap-client.sh` does: temporary SecureString parameters in the client account.
+2. On the old host, run `pg_dump -Fc` in `postgres:17-alpine` with `--network host`, and record the dump's sha256.
+   Write the dump into a private directory (`umask 077`, or `chmod 700`) and delete it afterwards. Read the old
+   database password from Systems Manager on the host into the container's environment (`-e PGPASSWORD` with no
+   value); never type it or put it on a command line.
+3. Upload the dump with a 15-minute presigned PUT to a temporary private S3 bucket in the client account. The bucket
+   has Block Public Access on and no policy that grants outside access.
+4. On the new host, download it with a 15-minute presigned GET and verify the sha256. Presigned URLs are bearer
+   credentials and show in the Run Command history while valid, so keep them short-lived.
+5. Run `pg_restore --no-owner --no-privileges` as the client role.
+6. Compare per-table row counts from both hosts. Drop blank and whitespace-only lines when parsing Run Command output;
+   that bit the tutorlink move.
+7. Delete the dumps on both hosts, the bucket and the staged parameters.
 
 ### CI
 
@@ -244,7 +299,8 @@ Removing a client from `clients` fails the plan on purpose (`prevent_destroy`). 
 - `tflint --init` and `tflint`, configured by `.tflint.hcl` (the `terraform` recommended preset and the `aws` ruleset)
 - `terraform test`
 
-A separate `shellcheck` job lints `database/bootstrap-client.sh`.
+A separate `shellcheck` job lints every committed shell script and runs the stub tests
+(`bash database/tests/scripts/run-tests.sh`), which replace `aws`, `terraform`, `docker`, `jq` and `sleep` with stubs.
 
 CI has no AWS credentials and no secrets, and never touches AWS. Dependabot checks the Terraform providers in all four
 roots (`organization/`, `bootstrap/`, `network/`, `database/`) weekly, alongside the GitHub Actions versions.
